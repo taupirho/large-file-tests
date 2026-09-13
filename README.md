@@ -1,108 +1,106 @@
-# How to read and process files bigger than RAM in Python
+# Six ways to process a CSV larger than RAM in Python
 
-Compare chunked reading and memory mapping with a generated binary sales file. The examples sum every record in the file, then compare `seek` and `mmap` for 50,000 individual lookups.
-
-Chunked reading streams blocks through a small input buffer. Memory mapping lets the operating system load file pages as they're accessed. Both examples keep a running total instead of collecting all the records in memory.
+Compare six methods for counting records and summing sales amounts in a 40 GB CSV. Each benchmark runs separately and reports elapsed time, throughput, and sampled process RAM.
 
 ## Setup
 
-You'll need Git, uv, and 64-bit Python 3.14 or later. The commands below work in PowerShell. Allow at least 40 GB of free disk space for the example data, plus space for the project and Python environment.
+Use 64-bit Python 3.14 or later and uv:
 
 ```powershell
 git clone https://github.com/taupirho/large-file-tests.git
 cd large-file-tests
 uv sync
-cd src
 ```
 
-Run the remaining commands from `src`. The generator writes `sales.bin` into the current directory, while the benchmark scripts look for it beside their source files.
+Run the commands below from the repository root. The scripts find their default data file beside themselves.
 
-## Create the data
+## Create the CSV
+
+Start with a small trial:
 
 ```powershell
-uv run python create_data.py 40
+uv run python csv_examples/create_csv.py 0.001 --path csv_examples/trial.csv
+uv run python csv_examples/read_stream.py --path csv_examples/trial.csv
 ```
 
-This creates a 40 GB file. Here, 1 GB means 1,000,000,000 bytes. You can supply another positive whole number, such as `1` for a smaller trial.
-
-The generator refuses to overwrite an existing `sales.bin`. Move or delete an unwanted data file yourself before generating a replacement. Git ignores `sales.bin`, so the data isn't included in this repository.
-
-To check total and currently available RAM in decimal GB:
+Create the full input when you have at least 40 GB of free disk space, plus room for the environment:
 
 ```powershell
-uv run python -c "import psutil; m = psutil.virtual_memory(); print(f'Total physical RAM: {m.total / 1_000_000_000:.2f} GB'); print(f'Available now: {m.available / 1_000_000_000:.2f} GB')"
+uv run python csv_examples/create_csv.py 40
 ```
 
-A 40 GB file isn't necessarily larger than your machine's RAM. Choose the file size to suit the comparison you want to make, and distinguish installed RAM from memory available at the time of the test.
+This writes exactly 40,000,000,000 bytes to `csv_examples/sales.csv`, plus expected counts in `sales.meta.json`. Existing data and metadata aren't overwritten. An interrupted generation can leave a partial CSV; move or remove that file yourself before retrying.
 
-## Process the entire file
+Generated data and metadata are ignored by Git. All reported GB values use decimal units: 1 GB = 1,000,000,000 bytes.
 
-```powershell
-uv run python read_chunks.py
-uv run python read_mmap.py
-```
+## What the file contains
 
-`read_chunks.py` reads 262,144 records per block. `read_mmap.py` creates a read-only mapping of the whole file and unpacks records directly from it. Mapping the file doesn't load all of it into physical RAM at once.
+The UTF-8 CSV has three columns:
 
-Both scripts report elapsed time, throughput, and the total amount in pence. For a 40 GB file, each should print:
+- `sale_id`: a row identifier, repeated from zero to 9,999 in each batch.
+- `amount_pence`: integer amounts from zero to 9,999.
+- `note`: variable-length text, including quoted commas, quotation marks, accented characters, and embedded line breaks.
+
+A batch of 10,000 records repeats throughout the file. A final zero-value row pads the file to its requested size. Identifiers aren't globally unique.
+
+For the generated 40 GB CSV, all six methods should return:
 
 ```text
-Total pence: 6,249,375,000,000
+Rows: 1,551,710,001
+Total pence: 7,757,774,145,000
 ```
 
-The scripts calculate the expected total from the file size and check it with an assertion. Run Python without `-O`, which disables these checks.
+## Run the six benchmarks
 
-The current scripts print throughput in MiB/s. If you want decimal GB/s, replace the throughput print statement in each reader with:
-
-```python
-print(f"Throughput: {size / 1_000_000_000 / elapsed:.3f} GB/s")
-```
-
-To experiment with smaller chunks, change `32 * 262_144` to `32 * 32_768` in `read_chunks.py`. Keep the file and calculation unchanged when comparing results.
-
-## Retrieve individual records
+| Script | Method |
+|---|---|
+| `csv_examples/read_stream.py` | Standard-library CSV parsing with a Python row loop. |
+| `csv_examples/read_mmap.py` | Read-only memory mapping with the same CSV parser. |
+| `csv_examples/read_pandas.py` | DataFrame chunks of up to 100,000 rows. |
+| `csv_examples/read_pyarrow.py` | Incremental Arrow record batches and column sums. |
+| `csv_examples/read_polars.py` | A lazy aggregation executed with the streaming engine. |
+| `csv_examples/read_duckdb.py` | A SQL aggregation directly over the CSV. |
 
 ```powershell
-uv run python random_access.py seek
-uv run python random_access.py mmap
+uv run python csv_examples/read_stream.py
+uv run python csv_examples/read_mmap.py
+uv run python csv_examples/read_pandas.py
+uv run python csv_examples/read_pyarrow.py
+uv run python csv_examples/read_polars.py
+uv run python csv_examples/read_duckdb.py
 ```
 
-The seek test uses buffered file reads. The mmap test unpacks each record at its byte offset in the mapping.
-
-Both use `Random(42)` to select 50,000 positions, with possible repeats. For a given file size, they use the same positions and should produce the same total. Changing the file size changes the positions, but the lookup count stays at 50,000.
-
-For the 40 GB file, the expected lookup total is:
-
-```text
-Total pence: 249,146,201
-```
-
-Position generation and expected-total calculation happen before the timer starts. The timed section includes opening and closing the file, performing the lookups, and creating and closing the mapping for the mmap test.
-
-## Read the timings carefully
-
-These tests measure reading and Python record processing together. Similar full-scan timings don't establish that the two access methods have identical overhead.
-
-The operating system caches file data in RAM. Creating the file or running a benchmark can leave data cached for later runs. Reversing the test order doesn't clear that cache. Repeat both tests in alternating order and compare median times, but don't describe those results as uncached disk performance.
-
-The 50,000 lookups touch only part of the file. That data can fit in RAM even when the whole file doesn't. This test therefore doesn't establish random-access performance for a working set larger than RAM. An uncached mmap access still has to fetch data from storage.
-
-Don't modify or truncate `sales.bin` while a benchmark is running. If you adapt the examples, keep intermediate results bounded too. Collecting every decoded record in a list would defeat the memory-saving approach.
-
-## Data format and extra validation
-
-Each record occupies 32 bytes and uses the struct format `<QQ16x`:
-
-- An unsigned 64-bit little-endian row number.
-- An unsigned 64-bit little-endian amount in pence.
-- 16 padding bytes.
-
-The file repeats a batch of 10,000 records. Row numbers restart at zero in each batch, so they aren't unique across the file. Amounts follow `(row * 37) % 10_000`, covering every integer from zero to 9,999 once per batch. Each batch totals 49,995,000 pence.
-
-A 40 GB file contains 125,000 batches and 1,250,000,000 records. For an additional full scan that checks both the record count and total, run:
+Every script accepts `--path` for another generated CSV. Keep its matching `.meta.json` beside it. For example:
 
 ```powershell
-uv run python sizes.py
+uv run python csv_examples/read_polars.py --path csv_examples/trial.csv
 ```
 
-Unlike the other readers, `sizes.py` specifically expects a 40 GB file.
+Don't modify or truncate the CSV during a benchmark. The mmap adapter is designed for the generator's UTF-8 encoding and LF line endings.
+
+## Reading the statistics
+
+The shared `benchmark_common.py` helper validates file size, row count, and amount total. It prints:
+
+- Elapsed seconds and throughput in GB/s.
+- Process RAM before processing.
+- Sampled peak process RAM.
+- Peak increase over the baseline.
+
+RAM means resident process memory, not the RAM available across your computer. Sampling targets a 50-millisecond interval and can miss short peaks. It includes resident library and mapped-file pages, but not the whole operating-system file cache. Three-decimal-place rounding can display a small increase as 0.000 GB.
+
+Imports and metadata loading are outside the timer. Reader setup, parsing, aggregation, and resource cleanup are inside it. Sampling adds some overhead.
+
+Repeat runs in different orders and compare median times. Earlier reads and file generation can warm the operating-system cache. These are processing benchmarks, not isolated disk-speed measurements. The analytical libraries can avoid retaining unused columns; the standard-library parser creates each row's fields.
+
+The examples retain only a small result. Collecting every row, concatenating all chunks, or performing a different query can have very different memory requirements.
+
+## Tests
+
+```powershell
+uv run python -m unittest discover -s csv_examples -v
+```
+
+Tests use temporary small CSVs, exercise all six command-line scripts, verify totals and RAM output, and check error handling. They don't generate or scan the 40 GB file.
+
+The previous binary-file benchmarks remain available in Git history.

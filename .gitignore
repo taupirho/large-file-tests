@@ -11,3 +11,11 @@ wheels/
 
 # Generated benchmark data
 sales.bin
+
+# Generated CSV benchmark data and validation metadata
+/csv_examples/*.csv
+/csv_examples/*.meta.json
+
+# Local artifacts, personal PDFs, and scratch work
+/output/
+/tmp/
